@@ -1,12 +1,12 @@
 [package]
-name = "paru"
+name = "paruvki"
 version = "2.2.0"
-authors = ["morganamilo <morganamilo@archlinux.org>"]
+authors = ["morganamilo <morganamilo@archlinux.org>", "Vikyek"]
 edition = "2024"
 
-description = "Feature packed AUR helper"
-homepage = "https://github.com/Morganamilo/paru"
-repository = "https://github.com/Morganamilo/paru"
+description = "paruVki — Feature packed AUR helper (fork of paru)"
+homepage = "https://github.com/Vikyek/paruVki"
+repository = "https://github.com/Vikyek/paruVki"
 documentation = "https://docs.rs/paru"
 license = "GPL-3.0"
 keywords = ["archlinux", "arch", "alpm", "pacman", "aur"]

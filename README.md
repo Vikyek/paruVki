@@ -1,6 +1,10 @@
-# Paru
+# paruVki
 
-Feature packed AUR helper
+Feature packed AUR helper — a modified GPL-3.0 fork of [morganamilo/paru](https://github.com/Morganamilo/paru) maintained by [Vikyek](https://github.com/Vikyek) (forked 2026-11-13).
+
+## Fork Changes
+
+- **Bounded devel-check concurrency & stall-vs-timeout distinction** (`src/devel.rs`, 2026-11-13): `git ls-remote` checks are bounded via a semaphore so queued jobs do not burn their timeout while waiting on other parallel checks, and transient stalls during parallel contention are retried once before reporting a timeout.
 
 [![paru](https://img.shields.io/aur/version/paru?color=1793d1&label=paru&logo=arch-linux&style=for-the-badge)](https://aur.archlinux.org/packages/paru/)
 [![paru-bin](https://img.shields.io/aur/version/paru-bin?color=1793d1&label=paru-bin&logo=arch-linux&style=for-the-badge)](https://aur.archlinux.org/packages/paru-bin/)

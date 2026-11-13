@@ -138,7 +138,7 @@ async fn run(run_args: &[&str], repo: bool) -> Result<(TempDir, i32)> {
     path.push_str(testdata.join("bin").to_str().unwrap());
 
     let execute = |args: &[&str]| -> Result<i32> {
-        let status = Command::new(env!("CARGO_BIN_EXE_paru"))
+        let status = Command::new(env!("CARGO_BIN_EXE_paruvki"))
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
             .env("TOKIO_WORKER_THREADS", "1")

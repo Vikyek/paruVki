@@ -3,3 +3,6 @@ paru.tar.*
 po/*.mo
 locale/
 testdata/pkg/*
+/pkg/
+*.pkg.tar.*
+*.pkg.tar.zst

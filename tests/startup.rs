@@ -17,7 +17,7 @@ fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 fn command(dir: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_paru"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_paruvki"));
     cmd.current_dir(dir)
         .env("HOME", dir)
         .env("XDG_CONFIG_HOME", dir.join("config"))

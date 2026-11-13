@@ -22,7 +22,8 @@ use raur::{Cache, Raur};
 use serde::{Deserialize, Serialize, Serializer};
 use srcinfo::Srcinfo;
 use tokio::process::Command as AsyncCommand;
-use tokio::time::timeout;
+use tokio::sync::Semaphore;
+use tokio::time::{sleep, timeout};
 use tr::tr;
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
@@ -264,6 +265,37 @@ async fn ls_remote_internal(
     Ok(sha)
 }
 
+const MAX_CONCURRENT_LS_REMOTE: usize = 8;
+const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(15);
+const LS_REMOTE_RETRY_TIMEOUT: Duration = Duration::from_secs(20);
+const LS_REMOTE_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+static LS_REMOTE_SEMAPHORE: Semaphore = Semaphore::const_new(MAX_CONCURRENT_LS_REMOTE);
+
+async fn run_ls_remote_with_retry<F, Fut>(
+    sem: &Semaphore,
+    first_timeout: Duration,
+    retry_timeout: Duration,
+    retry_delay: Duration,
+    mut op: F,
+) -> std::result::Result<Result<String>, ()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    {
+        let _permit = sem.acquire().await.expect("semaphore closed");
+        if let Ok(res) = timeout(first_timeout, op()).await {
+            return Ok(res);
+        }
+    }
+
+    // Release the permit so other parallel jobs can progress before retrying.
+    sleep(retry_delay).await;
+    let _permit = sem.acquire().await.expect("semaphore closed");
+    timeout(retry_timeout, op()).await.map_err(|_| ())
+}
+
 async fn ls_remote(
     style: Style,
     git: &str,
@@ -272,11 +304,16 @@ async fn ls_remote(
     branch: Option<&str>,
 ) -> Result<String> {
     let remote = &remote;
-    let time = Duration::from_secs(15);
-    let future = ls_remote_internal(git, flags, remote, branch);
-    let future = timeout(time, future);
+    let res = run_ls_remote_with_retry(
+        &LS_REMOTE_SEMAPHORE,
+        LS_REMOTE_TIMEOUT,
+        LS_REMOTE_RETRY_TIMEOUT,
+        LS_REMOTE_RETRY_DELAY,
+        || ls_remote_internal(git, flags, remote, branch),
+    )
+    .await;
 
-    if let Ok(v) = future.await {
+    if let Ok(v) = res {
         v
     } else {
         print_error(
@@ -595,5 +632,66 @@ mod tests {
         let result = ls_remote_internal("git", &[], "--get-url", path.to_str()).await;
 
         assert!(result.is_err(), "remote was interpreted as an option");
+    }
+
+    #[tokio::test]
+    async fn ls_remote_queues_without_burning_timeout_and_retries_transient_stall() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        // 1. Semaphore queue wait must not count toward the per-job timeout.
+        let sem = Arc::new(Semaphore::new(1));
+        let hold = sem.clone().acquire_owned().await.unwrap();
+        let sem_clone = sem.clone();
+        let queued = tokio::spawn(async move {
+            run_ls_remote_with_retry(
+                &sem_clone,
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+                Duration::from_millis(10),
+                || async { Ok("abc123".to_string()) },
+            )
+            .await
+        });
+        // Hold the only permit longer than the per-job timeout.
+        sleep(Duration::from_millis(80)).await;
+        drop(hold);
+        assert_eq!(queued.await.unwrap().unwrap().unwrap(), "abc123");
+
+        // 2. First-attempt timeout recovers on retry.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let res = run_ls_remote_with_retry(
+            &sem,
+            Duration::from_millis(25),
+            Duration::from_millis(80),
+            Duration::from_millis(10),
+            move || {
+                let n = attempts_clone.fetch_add(1, AtomicOrdering::SeqCst);
+                async move {
+                    if n == 0 {
+                        sleep(Duration::from_millis(60)).await;
+                    }
+                    Ok("recovered".to_string())
+                }
+            },
+        )
+        .await;
+        assert_eq!(res.unwrap().unwrap(), "recovered");
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 2);
+
+        // 3. Genuine stall on both attempts still reports timeout.
+        let res = run_ls_remote_with_retry(
+            &sem,
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+            || async {
+                sleep(Duration::from_millis(100)).await;
+                Ok("unreachable".to_string())
+            },
+        )
+        .await;
+        assert!(res.is_err());
     }
 }

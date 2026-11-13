@@ -1,4 +1,4 @@
-use paru::run;
+use paruvki::run;
 use std::process::exit;
 
 fn main() {
