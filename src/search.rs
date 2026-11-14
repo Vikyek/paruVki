@@ -26,7 +26,7 @@ pub enum AnyPkg<'a> {
 pub async fn search(config: &Config) -> Result<i32> {
     let quiet = config.args.has_arg("q", "quiet");
 
-    let repo_pkgs = search_repos(config, &config.targets)?;
+    let mut repo_pkgs = search_repos(config, &config.targets)?;
 
     let targets = config
         .targets
@@ -36,9 +36,11 @@ pub async fn search(config: &Config) -> Result<i32> {
 
     let custom_pkgs = search_pkgbuilds(config, &targets)?;
 
-    let pkgs = search_aur(config, &targets)
+    let mut pkgs = search_aur(config, &targets)
         .await
         .context(tr!("aur search failed"))?;
+
+    deduplicate_search_results(&mut repo_pkgs, &mut pkgs);
 
     let print_custom = || {
         for (repo, srcinfo, pkg) in &custom_pkgs {
@@ -487,9 +489,12 @@ pub fn interactive_search_local(config: &mut Config) -> Result<()> {
 }
 
 pub async fn interactive_search(config: &mut Config, install: bool) -> Result<()> {
-    let repo_pkgs = search_repos(config, &config.targets)?;
+    let mut repo_pkgs = search_repos(config, &config.targets)?;
     let custom_pkgs = search_pkgbuilds(config, &config.targets)?;
-    let aur_pkgs = search_aur(config, &config.targets).await?;
+    let mut aur_pkgs = search_aur(config, &config.targets).await?;
+
+    deduplicate_search_results(&mut repo_pkgs, &mut aur_pkgs);
+
     let mut all_pkgs = Vec::new();
 
     for pkg in repo_pkgs {
@@ -629,6 +634,220 @@ fn print_any_pkg(config: &Config, n: usize, pad: usize, pkg: &AnyPkg) {
             print_pkgbuild_pkg(config, repo, path, base, pkg, false)
         }
     };
+}
+
+pub fn deduplicate_search_results<'a>(
+    repo_pkgs: &mut Vec<&'a alpm::Package>,
+    aur_pkgs: &mut Vec<raur::Package>,
+) {
+    // 1. Deduplicate non-official sync repo vs official Arch repo packages
+    let mut remove_repo_indices = std::collections::HashSet::new();
+    for i in 0..repo_pkgs.len() {
+        for j in 0..repo_pkgs.len() {
+            if i == j {
+                continue;
+            }
+            let p1 = repo_pkgs[i];
+            let p2 = repo_pkgs[j];
+            if p1.name() != p2.name() {
+                continue;
+            }
+            let p1_official = p1.db().map(|d| is_arch_repo(d.name())).unwrap_or(false);
+            let p2_official = p2.db().map(|d| is_arch_repo(d.name())).unwrap_or(false);
+
+            if p1_official && !p2_official {
+                let cmp = alpm::vercmp(p1.version().as_str(), p2.version().as_str());
+                if cmp != std::cmp::Ordering::Less {
+                    remove_repo_indices.insert(j);
+                } else {
+                    remove_repo_indices.insert(i);
+                }
+            }
+        }
+    }
+
+    if !remove_repo_indices.is_empty() {
+        let mut idx = 0;
+        repo_pkgs.retain(|_| {
+            let keep = !remove_repo_indices.contains(&idx);
+            idx += 1;
+            keep
+        });
+    }
+
+    // 2. Deduplicate non-official sync repo vs AUR packages
+    let mut remove_custom_indices = std::collections::HashSet::new();
+    let mut remove_aur_names = std::collections::HashSet::new();
+
+    for (i, repo_pkg) in repo_pkgs.iter().enumerate() {
+        let is_official = repo_pkg.db().map(|d| is_arch_repo(d.name())).unwrap_or(false);
+        if is_official {
+            continue;
+        }
+
+        if let Some(aur_pkg) = aur_pkgs.iter().find(|a| a.name == repo_pkg.name()) {
+            let cmp = alpm::vercmp(repo_pkg.version().as_str(), aur_pkg.version.as_str());
+            if cmp != std::cmp::Ordering::Less {
+                // MKVPKG version is >= AUR version: remove duplicate aur_pkg from aur_pkgs
+                remove_aur_names.insert(aur_pkg.name.clone());
+            } else {
+                // MKVPKG version is strictly older than AUR version: remove stale MKVPKG entry from repo_pkgs
+                remove_custom_indices.insert(i);
+            }
+        }
+    }
+
+    if !remove_custom_indices.is_empty() {
+        let mut idx = 0;
+        repo_pkgs.retain(|_| {
+            let keep = !remove_custom_indices.contains(&idx);
+            idx += 1;
+            keep
+        });
+    }
+
+    if !remove_aur_names.is_empty() {
+        aur_pkgs.retain(|a| !remove_aur_names.contains(&a.name));
+    }
+}
+
+#[cfg(test)]
+pub fn deduplicate_entries(
+    repos: &mut Vec<(&str, &str, &str)>, // (name, version, db_name)
+    aur: &mut Vec<(&str, &str)>,          // (name, version)
+) {
+    let mut remove_repo_indices = std::collections::HashSet::new();
+    for i in 0..repos.len() {
+        for j in 0..repos.len() {
+            if i == j {
+                continue;
+            }
+            let (name1, ver1, db1) = repos[i];
+            let (name2, ver2, db2) = repos[j];
+            if name1 != name2 {
+                continue;
+            }
+            let p1_official = is_arch_repo(db1);
+            let p2_official = is_arch_repo(db2);
+
+            if p1_official && !p2_official {
+                let cmp = alpm::vercmp(ver1, ver2);
+                if cmp != std::cmp::Ordering::Less {
+                    remove_repo_indices.insert(j);
+                } else {
+                    remove_repo_indices.insert(i);
+                }
+            }
+        }
+    }
+
+    if !remove_repo_indices.is_empty() {
+        let mut idx = 0;
+        repos.retain(|_| {
+            let keep = !remove_repo_indices.contains(&idx);
+            idx += 1;
+            keep
+        });
+    }
+
+    let mut remove_custom_indices = std::collections::HashSet::new();
+    let mut remove_aur_names = std::collections::HashSet::new();
+
+    for (i, &(repo_name, repo_ver, db_name)) in repos.iter().enumerate() {
+        let is_official = is_arch_repo(db_name);
+        if is_official {
+            continue;
+        }
+
+        if let Some(&(_, aur_ver)) = aur.iter().find(|(name, _)| *name == repo_name) {
+            let cmp = alpm::vercmp(repo_ver, aur_ver);
+            if cmp != std::cmp::Ordering::Less {
+                remove_aur_names.insert(repo_name);
+            } else {
+                remove_custom_indices.insert(i);
+            }
+        }
+    }
+
+    if !remove_custom_indices.is_empty() {
+        let mut idx = 0;
+        repos.retain(|_| {
+            let keep = !remove_custom_indices.contains(&idx);
+            idx += 1;
+            keep
+        });
+    }
+
+    if !remove_aur_names.is_empty() {
+        aur.retain(|(name, _)| !remove_aur_names.contains(name));
+    }
+}
+
+#[cfg(test)]
+mod deduplication_tests {
+    use super::*;
+
+    #[test]
+    fn test_deduplicate_official_vs_custom() {
+        // Official is equal to Custom -> custom is filtered out
+        let mut repos = vec![
+            ("ripgrep", "14.1.0-1", "extra"),
+            ("ripgrep", "14.1.0-1", "MKVPKG"),
+        ];
+        let mut aur = vec![];
+        deduplicate_entries(&mut repos, &mut aur);
+        assert_eq!(repos, vec![("ripgrep", "14.1.0-1", "extra")]);
+
+        // Official is newer than Custom -> custom is filtered out
+        let mut repos = vec![
+            ("ripgrep", "14.2.0-1", "extra"),
+            ("ripgrep", "14.1.0-1", "MKVPKG"),
+        ];
+        deduplicate_entries(&mut repos, &mut aur);
+        assert_eq!(repos, vec![("ripgrep", "14.2.0-1", "extra")]);
+
+        // Custom is strictly newer than Official -> official is filtered out
+        let mut repos = vec![
+            ("ripgrep", "14.1.0-1", "extra"),
+            ("ripgrep", "14.1.1-1", "MKVPKG"),
+        ];
+        deduplicate_entries(&mut repos, &mut aur);
+        assert_eq!(repos, vec![("ripgrep", "14.1.1-1", "MKVPKG")]);
+    }
+
+    #[test]
+    fn test_deduplicate_custom_vs_aur() {
+        // Custom is equal to AUR -> duplicate AUR is filtered out, MKVPKG kept
+        let mut repos = vec![("custom-tool", "1.0.0-1", "MKVPKG")];
+        let mut aur = vec![("custom-tool", "1.0.0-1")];
+        deduplicate_entries(&mut repos, &mut aur);
+        assert_eq!(repos, vec![("custom-tool", "1.0.0-1", "MKVPKG")]);
+        assert!(aur.is_empty());
+
+        // Custom is newer than AUR (e.g. locally built -git) -> AUR filtered out, MKVPKG kept
+        let mut repos = vec![("custom-tool", "2.0.0-1", "MKVPKG")];
+        let mut aur = vec![("custom-tool", "1.0.0-1")];
+        deduplicate_entries(&mut repos, &mut aur);
+        assert_eq!(repos, vec![("custom-tool", "2.0.0-1", "MKVPKG")]);
+        assert!(aur.is_empty());
+
+        // Custom is strictly older than AUR -> stale MKVPKG filtered out, AUR kept
+        let mut repos = vec![("custom-tool", "1.0.0-1", "MKVPKG")];
+        let mut aur = vec![("custom-tool", "1.0.1-1")];
+        deduplicate_entries(&mut repos, &mut aur);
+        assert!(repos.is_empty());
+        assert_eq!(aur, vec![("custom-tool", "1.0.1-1")]);
+    }
+
+    #[test]
+    fn test_deduplicate_official_vs_aur_preserved() {
+        // Official repos vs AUR packages are untouched by deduplicate_entries
+        let mut repos = vec![("git", "2.40.0-1", "extra")];
+        let mut aur = vec![("git", "2.40.0-1")];
+        deduplicate_entries(&mut repos, &mut aur);
+        assert_eq!(repos, vec![("git", "2.40.0-1", "extra")]);
+        assert_eq!(aur, vec![("git", "2.40.0-1")]);
+    }
 }
 
 #[cfg(all(test, feature = "mock"))]

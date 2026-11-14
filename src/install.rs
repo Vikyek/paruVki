@@ -22,7 +22,7 @@ use crate::keys::check_pgp_keys;
 use crate::pkgbuild::PkgbuildRepo;
 use crate::resolver::{flags, resolver};
 use crate::upgrade::{Upgrades, get_upgrades};
-use crate::util::{ask, now_secs, repo_aur_pkgs, split_repo_aur_targets};
+use crate::util::{ask, is_arch_repo, now_secs, repo_aur_pkgs, split_repo_aur_targets};
 use crate::{args, config, exec, news, print_error, printtr, repo};
 
 use alpm::{Alpm, Depend, Version};
@@ -888,7 +888,47 @@ impl Installer {
         config.args.targets = config.targets.clone();
 
         let targets = args::parse_targets(targets_str);
-        let (mut repo_targets, aur_targets) = split_repo_aur_targets(config, &targets)?;
+        let (mut repo_targets, mut aur_targets) = split_repo_aur_targets(config, &targets)?;
+
+        if config.mode.aur() && config.raur.is_some() {
+            let dbs = config.alpm.syncdbs();
+            let mut move_to_aur = Vec::new();
+
+            for (idx, targ) in repo_targets.iter().enumerate() {
+                if targ.repo.is_none() {
+                    let in_official = dbs
+                        .iter()
+                        .any(|db| is_arch_repo(db.name()) && db.pkg(targ.pkg).is_ok());
+                    if !in_official {
+                        if let Some(repo_pkg) = dbs
+                            .iter()
+                            .find_map(|db| if !is_arch_repo(db.name()) { db.pkg(targ.pkg).ok() } else { None })
+                        {
+                            move_to_aur.push((idx, targ.pkg.to_string(), repo_pkg.version().as_str().to_string()));
+                        }
+                    }
+                }
+            }
+
+            if !move_to_aur.is_empty() {
+                let pkg_names: Vec<String> = move_to_aur.iter().map(|(_, name, _)| name.clone()).collect();
+                if let Ok(aur_pkgs) = config.raur.as_ref().unwrap().info(&pkg_names).await {
+                    let mut indices_to_move = Vec::new();
+                    for (idx, name, repo_ver) in &move_to_aur {
+                        if let Some(aur_pkg) = aur_pkgs.iter().find(|p| p.name == *name) {
+                            if alpm::vercmp(repo_ver.as_str(), aur_pkg.version.as_str()) == std::cmp::Ordering::Less {
+                                indices_to_move.push(*idx);
+                            }
+                        }
+                    }
+                    indices_to_move.sort_unstable_by(|a, b| b.cmp(a));
+                    for idx in indices_to_move {
+                        let targ = repo_targets.remove(idx);
+                        aur_targets.push(targ);
+                    }
+                }
+            }
+        }
 
         if targets_str.is_empty() && self.sysupgrade == 0 && !self.sysupgrade == 0 {
             bail!(tr!("no targets specified (use -h for help)"));
