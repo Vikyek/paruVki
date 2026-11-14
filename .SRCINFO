@@ -1,0 +1,19 @@
+pkgbase = paruvki
+	pkgdesc = paruVki — Feature packed AUR helper (fork of paru)
+	pkgver = 2.2.0
+	pkgrel = 1
+	url = https://github.com/Vikyek/paruVki
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-or-later
+	makedepends = cargo
+	depends = git
+	depends = pacman>=7.1
+	depends = libalpm.so=16-64
+	optdepends = bat: colored pkgbuild printing
+	optdepends = devtools: build in chroot and downloading pkgbuilds
+	provides = paru
+	conflicts = paru
+	backup = etc/paru.conf
+
+pkgname = paruvki
