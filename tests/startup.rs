@@ -2136,3 +2136,51 @@ fn pkgbuild_search_and_info_escape_terminal_metadata() {
         }
     }
 }
+
+#[test]
+fn interactive_search_select_file_outputs_selection_without_installing() {
+    let repo = PkgbuildReview::new("", true);
+    repo.push(1);
+    let output = repo.refresh("y\n");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.trace(), "review\n");
+
+    let select_file = repo.tmp.path().join("selected.txt");
+    fs::write(&select_file, "").unwrap();
+    fs::write(repo.tmp.path().join("capture"), "").unwrap();
+
+    // Selecting index 1 writes target to PARU_SEARCH_SELECT_FILE and exits 0 without installing.
+    let mut cmd = command(repo.tmp.path());
+    cmd.args(["--pkgbuilds", "--color", "never", "fixture"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("PARU_SEARCH_SELECT_FILE", &select_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"1\n").unwrap();
+    let res = child.wait_with_output().unwrap();
+    assert!(res.status.success(), "{res:?}");
+    let stdout = String::from_utf8(res.stdout).unwrap();
+    assert!(stdout.contains("Packages to install"), "{stdout:?}");
+    assert_eq!(fs::read_to_string(&select_file).unwrap(), "fixture/fixture\n");
+    assert_eq!(repo.trace(), "");
+
+    // Empty selection leaves PARU_SEARCH_SELECT_FILE empty.
+    fs::write(&select_file, "").unwrap();
+    let mut cmd = command(repo.tmp.path());
+    cmd.args(["--pkgbuilds", "--color", "never", "fixture"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("PARU_SEARCH_SELECT_FILE", &select_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"\n").unwrap();
+    let res = child.wait_with_output().unwrap();
+    assert!(res.status.success(), "{res:?}");
+    assert_eq!(fs::read_to_string(&select_file).unwrap(), "");
+}

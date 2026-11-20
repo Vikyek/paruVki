@@ -379,6 +379,12 @@ async fn handle_sync(config: &mut Config) -> Result<i32> {
             if config.targets.is_empty() {
                 return Ok(1);
             }
+            if let Ok(select_path) = env::var("PARU_SEARCH_SELECT_FILE") {
+                if !select_path.is_empty() {
+                    std::fs::write(&select_path, config.targets.join("\n") + "\n")?;
+                    return Ok(0);
+                }
+            }
         }
         let target = std::mem::take(&mut config.targets);
         install::install(config, &target).await?;
